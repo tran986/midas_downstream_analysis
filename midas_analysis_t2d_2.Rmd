@@ -1,0 +1,263 @@
+---
+title: "midas2_T2D"
+output: html_document
+date: "2023-09-28"
+---
+#library setup
+library(testthat)
+library(ape)
+library(Matrix)
+library(phylolm)
+library(broom)
+library(tidyverse)
+library(dplyr)
+library(tidyr)
+library(GGally)
+library(readr)
+library(plotly)
+library(vegan)
+#dataset imported: 
+#data is only T2D_2 only:
+setwd("~/Desktop/midas2_T2D_2")
+
+
+###########################################################IMPORTING SPECIES_PREVALENCE AND ABUNDANCE TSV FROM T2D_2 MIDAS_MERGED DIRECTORY
+species_prevalence <- read.delim("~/Desktop/midas2_T2D_2/species_prevalence.tsv")
+species_relative_abundance <- read.delim("~/Desktop/midas2_T2D_2/species_relative_abundance.tsv")
+###########################################################IDENTIFYING THE MOST ABUNDANT SPECIES IN THE DIRECTORIES T2D_2
+pre_2 <- species_prevalence %>% dplyr::select('species_id','median_abundance','mean_abundance','median_coverage','mean_coverage')
+
+metadata_uhgg_final
+#join metadata.csv to the species_relative_abundance:
+abd_join <- metadata_uhgg_final %>% inner_join(species_relative_abundance, by="species_id") %>% dplyr::select(c(1:3), c(18:24), c(26:171))
+
+pre_abd_metadata_join <- abd_join %>% inner_join(pre_2,by="species_id") #joining metadata with prevalence and abundance midas2 data 
+colnames(pre_abd_metadata_join)   
+pre_abd_metadata_join[which.max(pre_abd_metadata_join$mean_abundance),]
+max_abd <- pre_abd_metadata_join[which.max(pre_abd_metadata_join$mean_coverage),]
+#highest abundance:species_id: 102492, p__Firmicutes_A, c__Clostridia, o__Lachnospirales,f__Lachnospiraceae,g__Agathobacter, s__Agathobacter rectale, mean_abundance:0.036, mean_coverage: 17.454
+print(pre_abd_metadata_join[order(pre_abd_metadata_join$mean_abundance, decreasing = TRUE), ])
+#look for the top 5 species_id with the highest mean abundance.
+#1:102492, p__Firmicutes_A, c__Clostridia, o__Lachnospirales,f__Lachnospiraceae,g__Agathobacter, s__Agathobacter rectale, mean_abundance:0.036, mean_coverage: 17.454
+#2:100258, d__Bacteria,p__Firmicutes_A,c__Clostridia,o__Oscillospirales,f__Acutalibacteraceae,g__Ruminococcus_E,s__Ruminococcus_E bromii_B, s__Ruminococcus_E bromii_B, mean_abd:0.026
+#3:101338,d__Bacteria	p__Firmicutes_A	c__Clostridia	o__Lachnospirales, f__Lachnospiraceae	g__Blautia_A	s__Blautia_A wexlerae	s__Blautia_A wexlerae, mean_abd=0.025
+#4:103937,d__Bacteria	p__Firmicutes_A	c__Clostridia	o__Oscillospirales, f__Ruminococcaceae	g__Gemmiger	s__Gemmiger sp003476825	s__Gemmiger sp003476825, mean_abd=0.024
+#5:101346,d__Bacteria	p__Bacteroidota	c__Bacteroidia	o__Bacteroidales, f__Bacteroidaceae	g__Bacteroides	s__Bacteroides uniformis	s__Bacteroides uniformis, mean_abd=0.022 
+
+##########################################################PREPPING DATA FOR FITTING MODELS
+##################draft-things i have to do in this computer only, ignored this part if working on different local machine
+sort_ERR_NG = read.csv("~/Desktop/sort_ERR_NG.csv")
+clean_ERR_NG <-sort_ERR_NG %>% dplyr::select('run_accession','Status') %>% rename('Run'='run_accession')
+
+sort_ERR <- read.csv("~/Desktop/sort_ERR.csv")
+clean_ERR <- sort_ERR %>% dplyr::select('run_accession','Status') %>% rename('Run'='run_accession')
+
+sort_SRR <- read.csv("~/Desktop/sort_SRR.csv")
+clean_SRR <- sort_SRR %>% dplyr::select('Run','Status')
+
+merge_ls <- list(clean_ERR_NG,clean_ERR,clean_SRR)
+metadata_phylo_file <- Reduce(function(x,y) merge(x, y, all=TRUE), merge_ls)
+
+str <- metadata_phylo_file %>% filter(Run == "ERR275251" | Run=="ERR275252")
+env_2_subsample <- metadata_phylo_file[str_detect(metadata_phylo_file$Run, "ERR260"), ] %>% rbind(str)
+###########################################################this part failed completely LOL=))) DUMMY CODING AND LINEAR MODELS ON DUMMY VARIABLES (LINEAR MODEL ON STATUS AND RUN)
+#make dataset for dummy coding:
+species_relative_abundance_longer=species_relative_abundance %>% pivot_longer(!species_id, names_to="Run", values_to="Count")
+species_abd_env=left_join(species_relative_abundance_longer,env_2_subsample, by="Run")
+normalized_species_abd_env= species_abd_env %>% mutate(norm_count=Count/max(Count,na.rm=FALSE))
+
+dummy_df=normalized_species_abd_env %>% select(Status, norm_count)
+install.packages("fastDummies")
+library(fastDummies)
+df=dummy_cols(dummy_df, select_columns ="Status") %>% rename("CTRL"="Status_ND CTRL") %>% rename("met_negative"="Status_T2D metformin-") %>% rename("met_positive"="Status_T2D metformin+")
+
+model=lm(norm_count ~ CTRL + met_negative, data=df)
+summary(model)
+####
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install(version = "3.17")
+BiocManager::install("ALDEx2")
+
+#######################################################FINDING THE SPECIES THAT ARE MORE/LESS ABUNDANT BETWEEN CASE VS CONTROL (T2D_2):
+species_abd_env
+species_abd_env_ctr=species_abd_env%>% filter(Status=="ND CTRL")
+species_abd_env_met_negative=species_abd_env%>% filter(Status=="T2D metformin-")
+species_abd_env_met_positive=species_abd_env%>%filter(Status=="T2D metformin+")
+
+sum_count_ctr=species_abd_env_ctr %>% group_by(species_id) %>% summarize(sum_CT=sum(Count),
+                                                           .groups='drop')
+sum_count_met_negative=species_abd_env_met_negative %>% group_by(species_id) %>% summarise(sum_met_negative=sum(Count),
+                                                                                           .groups='drop')
+sum_count_met_positive=species_abd_env_met_positive %>% group_by(species_id) %>% summarise(sum_met_positive=sum(Count),
+                                                                                           .groups='drop')
+#COMPARE THE SUM_COUNT_CTR WITH SUM_COUNT_MET_POSITIVE AND WITH SUM_COUNT_MET_NEGATIVE:
+View(sum_count_met_positive)
+View(sum_count_met_negative)
+View(sum_count_ctr)
+#difference in top 5 species mentioned earlier:
+#102492:CTRL:3.182 | Met-:1.126 | Met+:0.84
+#100258:CTRL:2.182 | Met-:0.969 | Met+:0.547
+#101338:CTRL:1.885 | Met-:1.026 | Met+:0.756
+#103937:CTRL:2.368 | Met-:0.742 | Met+:0.376
+#101346:CTRL:1.671 | Met-:0.874 | Met+:0.637
+#comparison for all species:
+all_env_sum_count=sum_count_met_positive %>% cbind(sum_count_ctr%>%select(sum_CT)) %>% cbind(sum_count_met_negative%>%select(sum_met_negative))
+
+#######################################################ANALYZING THE PRE/ABS OF THE 102492 SPECIES IN ALL RUN SAMPLES OF T2D_2:
+##############################################################################################################################
+A_rectale_presabs <- read.delim("~/Desktop/midas_cnv_102492/102492.genes_presabs.tsv")
+colnames(A_rectale_presabs)
+A_rectale_presabs_longer=A_rectale_presabs %>% pivot_longer(cols=c(2:99), names_to="Run", values_to="presence_absence")
+A_rectale_run=unique(A_rectale_presabs_longer$Run)
+
+env_A_rectale=metadata_phylo_file %>% filter(Run %in% A_rectale_run)
+#######################################################PREPPING DATA FOR PRESABS FOR FISCHER'S TEST OF 102492 SPECIES (A.RECTALE):
+env_A_rectale_wider=env_A_rectale %>% pivot_wider(names_from=Run, values_from=Status)
+d=A_rectale_presabs%>%select(c(2:99))
+e=A_rectale_presabs%>%select(gene_id)
+A_rectale_presabs_env=env_A_rectale_wider%>%rbind(d)
+columns_new=paste(names(A_rectale_presabs_env),as.matrix(A_rectale_presabs_env[1,]))
+colnames(A_rectale_presabs_env)=columns_new
+A_rectale_presabs_env_merge=A_rectale_presabs_env[-1,]
+A_rectale_new=e%>%cbind(A_rectale_presabs_env_merge)
+View(A_rectale_new)
+#####################################################MAKING MET_POSITIVE AND MET_NEGATIVE DATAFRAMES
+gene_info=A_rectale_new %>% select(gene_id)
+met_positive=gene_info %>% cbind(A_rectale_new %>% select(contains("+")))
+met_negative=gene_info %>% cbind(A_rectale_new %>% select(matches("-"))) %>% cbind(A_rectale_new %>% select(matches("ND")))
+
+met_positive_glm=met_positive %>% mutate(case_count=rowSums(. ==1)) %>% mutate(control_count=0) %>% select(gene_id,case_count,control_count)
+
+neg_1=met_negative %>% mutate(case_count=rowSums(. ==1)) %>% select(-gene_id)
+neg_2=met_negative %>% mutate(control_count=rowSums(. ==0)) 
+met_negative_glm=neg_2 %>% cbind(neg_1) %>% select(gene_id,case_count,control_count)
+
+######################################################INSTALLATION ALDex2 and clr packages
+#################################################### MAKING CONTENGINGY TABLES:
+
+###APPROACH ONE (USING UNIQUE TOTAL ZEROS AND ONES)
+
+#obtain of the lists of genes that are replicated for multiple times (from sum_m1_margin_name)
+bind_sub_m1_margin_name=bind_rows(sub_m1_margin_name) 
+bind_margin_sub=bind_sub_m1_margin_name %>% mutate(presab_totalcount=paste(bind_sub_m1_margin_name$presab, bind_sub_m1_margin_name$total_presab, sep="_"))
+aggregate(gene_id ~ presab_totalcount, bind_margin_sub, toString)
+
+#keeping only the unique p-values:
+
+model_sub=lapply(sub_m1, function(x) glm(n~(env+treatment)*presab, family=poisson, data=x))
+model_summary_sub=lapply(model_sub, function(x) summary(x))
+coef_summary_sub=lapply(model_summary_sub, function(x) x$coefficients %>% data.frame() %>% rename("pval"="Pr...z.."))
+coef_df_m=lapply(coef_summary_sub, function(x) cbind(rownames(x), data.frame(x, row.names = NULL)) %>% rename("coef_name"='rownames(x)') %>% select(c(1), c(5)) )
+
+coef_with_name=map2(tail_100_margin_name,coef_df_m, ~ .y %>% mutate(gene_id={.x}))
+
+comb_sub=bind_rows(coef_with_name)
+name_combine_variable=comb_sub %>% mutate(variable_genename=paste(comb_sub$coef_name, comb_sub$gene_id, sep="_")) %>% select(pval,variable_genename)
+unique_pval_all=aggregate(variable_genename ~ pval, name_combine_variable, toString)
+
+##do the same thing but with pval_env, pval_treatment, pval
+comb_sub_evn=comb_sub %>% filter(coef_name=="envcontrol") %>% select(pval, gene_id)
+unique_pval_env=aggregate(gene_id ~ pval, comb_sub_evn, toString)
+
+#pval treatment 
+comb_sub_treatment=comb_sub %>% filter(coef_name=="treatmentyes") %>% select(pval, gene_id)
+unique_pval_treatment=aggregate(gene_id ~ pval, comb_sub_treatment, toString)
+
+ggplot(unique_pval_env, aes(x=pval))+
+  geom_histogram(color="darkgray", fill="#4b015e") +
+  labs(y="p_values distribution", x="p_vals of treatment") 
+
+######################################################INSTALLATION ALDex2 and clr packages
+
+#################################################### MAKING CONTENGINGY TABLES:
+#####################################################the problem now is to apply all of these to all genes 
+#########################################################################################################
+dt=split(A_rectale_presabs, A_rectale_presabs$gene_id)
+
+#step 1 (but for all genes)
+s=lapply(dt, function(x) pivot_longer(x,!gene_id, names_to="run", values_to="presab"))
+s1=lapply(s, function(x) cbind(x, env_A_rectale))
+
+#step 2 (but for all genes)
+case_ctrl=lapply(s1, function(x) x %>% mutate(env=ifelse(x$Status=="ND CTRL","control","case")))
+met_treatment=lapply(case_ctrl, function(x) x %>% mutate(treatment=ifelse(x$Status=="T2D metformin+","yes","no")))
+#step 3 (but for all genes)
+
+final_df=lapply(met_treatment, function (x) x %>% group_by(env, treatment) %>% count(presab))
+namelist_full=names(final_df)
+final_df_w_name=map2(namelist_full,final_df, ~ .y %>% mutate(gene_id={.x}))
+count=lapply(final_df_w_name, function(x) x %>% group_by(presab) %>% summarize(total_presab=sum(n)))
+total_count_final=lapply(count, function(x) x %>% pivot_wider(names_from=presab, values_from=total_presab))
+name_count_name=map2(namelist_full, total_count_final, ~ .y %>% mutate(gene_id={.x}))
+combine_final=bind_rows(name_count_name) %>% rename("abs"="0","pres"="1") %>% replace(., is.na(.), 0)
+
+#the tables that have all geneids with same total number of presence and total number of absence:
+combine_final_2=combine_final %>% mutate(pres_abs=paste(combine_final$pres, combine_final$abs, sep="_")) %>% aggregate(gene_id ~ pres_abs, toString) 
+#keeping only the first gene id for each unique pres_abs row:
+combine_final_sep=combine_final_2 %>% separate(
+  col=gene_id,
+  into=c("representative_gene_id","others"), 
+  sep=",",
+  extra="merge"
+) 
+###
+combine_final_sep<-read.csv("~/Desktop/final_tbl_unique_a_rectale.csv")
+###
+combine_final_only_unique=combine_final_sep$representative_gene_id
+combine_gene_rep=A_rectale_presabs %>% filter(gene_id %in% combine_final_only_unique)
+#now creating contingency tbl and apply models:
+unique_a.rectale=split(combine_gene_rep, combine_gene_rep$gene_id)
+unique_a.rectale_longer=lapply(unique_a.rectale, function(x) pivot_longer(x,!gene_id, names_to="run", values_to="presab") %>% cbind(env_A_rectale))
+unique_a.rectale_condition=lapply(unique_a.rectale_longer, function(x) x %>% mutate(env=ifelse(x$Status=="ND CTRL","control","case")) %>% mutate(treatment=ifelse(x$Status=="T2D metformin+","yes","no")))
+unique_a.rectale_count_tbl=lapply(unique_a.rectale_condition, function(x) x %>% group_by(env, treatment) %>% count(presab))
+unique_a.rectale_glm=lapply(unique_a.rectale_count_tbl, function(x) glm(n~(env+treatment)*presab, family=poisson, data=x))
+unique_a.rectale_coef=lapply(unique_a.rectale_glm, function(x) coefficients(summary(x)) %>% data.frame() %>% rename("pval"="Pr...z.."))
+unique_a.rectale_coef_cleaned=lapply(unique_a.rectale_coef, function(x) cbind(rownames(x), data.frame(x, row.names = NULL)) %>% rename("coef_name"='rownames(x)') %>% select(c(1), c(5)))
+unique_a.rectale_names=names(unique_a.rectale_coef_cleaned)
+unique_a.rectale_coef_idmap=map2(unique_a.rectale_names,unique_a.rectale_coef_cleaned, ~ .y %>% mutate(gene_id={.x}))
+
+unique_a.rectale_combine=bind_rows(unique_a.rectale_coef_idmap)
+
+#save the unique_a.rectale_combine:
+#making pval histogram with plotly/shiny:
+unique_a.rectale_env_graph=unique_a.rectale_combine %>% filter(coef_name=="envcontrol") %>% ggplot(aes(x=pval)) + geom_histogram(color="darkgrey", fill="#bd3634", bins=40) +
+  labs(y="p_values distribution", x="p_vals of environment")
+unique_a.rectale_treatment_graph=unique_a.rectale_combine %>% filter(coef_name=="treatmentyes") %>% ggplot(aes(x=pval)) + geom_histogram(color="darkgrey", fill="#bd3634", bins=40) +
+  labs(y="p_values distribution", x="p_vals of treatment")
+unique_a.rectale_presab_graph=unique_a.rectale_combine %>% filter(coef_name=="presab") %>% ggplot(aes(x=pval)) + geom_histogram(color="darkgrey", fill="#bd3634", bins=45) +
+  labs(y="p_values distribution", x="p_vals of presab")
+unique_a.rectale_env.presab_graph=unique_a.rectale_combine %>% filter(coef_name=="envcontrol:presab") %>% ggplot(aes(x=pval)) + geom_histogram(color="darkgrey", fill="#bd3634", bins=45) +
+  labs(y="p_values distribution", x="p_vals of env:presab")
+unique_a.rectale_treatment.presab_graph=unique_a.rectale_combine %>% filter(coef_name=="treatmentyes:presab") %>% ggplot(aes(x=pval)) + geom_histogram(color="darkgrey", fill="#bd3634", bins=45) +labs(y="p_values distribution", x="p_vals of treatment:presab")
+
+ggplotly(unique_a.rectale_presab_graph)
+ggplotly(unique_a.rectale_treatment_graph)
+ggplotly(unique_a.rectale_env_graph)
+ggplotly(unique_a.rectale_treatment.presab_graph)
+ggplotly(unique_a.rectale_env.presab_graph)
+
+wider_unique_a.rectale_combine=unique_a.rectale_combine %>% pivot_wider(names_from=coef_name, values_from=pval)
+
+library(shiny)
+ui<-fluidPage(
+  titlePanel("P-values Distribution of A.rectale"),
+  sidebarLayout(
+    sidebarPanel(
+      selectInput("coefficient_name","select a coefficient name to create histogram", choices=unique(unique_a.rectale_combine$coef_name))
+                  ),
+    mainPanel(
+      plotOutput(outputId = "a.rectaleOutput")
+    )
+  )
+)
+server<-shinyServer(function(input,output){
+  output$a.rectaleOutput<- renderPlot({
+    hist(unique_a.rectale_combine$pval[unique_a.rectale_combine$coef_name == input$coefficient_name], 
+     main = 'pval distribution' )
+    }
+)
+    }
+    )
+
+shinyApp(ui = ui, server = server)
